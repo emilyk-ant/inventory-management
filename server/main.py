@@ -1,8 +1,10 @@
+from datetime import datetime, timedelta
+from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
-from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
+from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders, restocking_orders
 
 app = FastAPI(title="Factory Inventory Management System")
 
@@ -13,6 +15,9 @@ QUARTER_MAP = {
     'Q3-2025': ['2025-07', '2025-08', '2025-09'],
     'Q4-2025': ['2025-10', '2025-11', '2025-12']
 }
+
+# Flat delivery lead time applied to every restocking order
+LEAD_TIME_DAYS = 14
 
 def filter_by_month(items: list, month: Optional[str]) -> list:
     """Filter items by month/quarter based on order_date field"""
@@ -45,6 +50,59 @@ def apply_filters(items: list, warehouse: Optional[str] = None, category: Option
         filtered = [item for item in filtered if item.get('status', '').lower() == status.lower()]
 
     return filtered
+
+# Trend priority for restocking recommendations: increasing demand is most urgent to restock
+RESTOCKING_TREND_RANK = {'increasing': 0, 'stable': 1, 'decreasing': 2}
+
+def compute_restocking_recommendations(budget: float) -> dict:
+    """Greedily recommend demand-forecast items to restock within budget.
+
+    Prioritizes items by trend urgency (increasing demand first), then by the
+    largest demand gap. Walks the sorted list including each item's full
+    suggested quantity if it fits the remaining budget, otherwise skipping it
+    and moving on (classic greedy, not knapsack-optimal - intentional for a
+    demo: it keeps the recommendation order legible instead of maximizing
+    budget utilization).
+    """
+    candidates = []
+    for forecast in demand_forecasts:
+        gap = forecast['forecasted_demand'] - forecast['current_demand']
+        if gap <= 0:
+            continue
+        line_total = round(gap * forecast['unit_cost'], 2)
+        candidates.append({
+            'item_sku': forecast['item_sku'],
+            'item_name': forecast['item_name'],
+            'trend': forecast['trend'],
+            'current_demand': forecast['current_demand'],
+            'forecasted_demand': forecast['forecasted_demand'],
+            'suggested_quantity': gap,
+            'unit_cost': forecast['unit_cost'],
+            'line_total': line_total
+        })
+
+    candidates.sort(key=lambda c: (RESTOCKING_TREND_RANK.get(c['trend'], 3), -c['suggested_quantity']))
+
+    remaining_budget = round(budget, 2)
+    recommended_items = []
+    skipped_item_skus = []
+    total_cost = 0.0
+
+    for candidate in candidates:
+        if candidate['line_total'] <= remaining_budget:
+            recommended_items.append(candidate)
+            remaining_budget = round(remaining_budget - candidate['line_total'], 2)
+            total_cost = round(total_cost + candidate['line_total'], 2)
+        else:
+            skipped_item_skus.append(candidate['item_sku'])
+
+    return {
+        'budget': budget,
+        'recommended_items': recommended_items,
+        'total_cost': total_cost,
+        'remaining_budget': remaining_budget,
+        'skipped_item_skus': skipped_item_skus
+    }
 
 # CORS middleware
 app.add_middleware(
@@ -89,6 +147,7 @@ class DemandForecast(BaseModel):
     forecasted_demand: int
     trend: str
     period: str
+    unit_cost: float
 
 class BacklogItem(BaseModel):
     id: str
@@ -119,6 +178,45 @@ class CreatePurchaseOrderRequest(BaseModel):
     unit_cost: float
     expected_delivery_date: str
     notes: Optional[str] = None
+
+class RestockingRecommendationItem(BaseModel):
+    item_sku: str
+    item_name: str
+    trend: str
+    current_demand: int
+    forecasted_demand: int
+    suggested_quantity: int
+    unit_cost: float
+    line_total: float
+
+class RestockingRecommendationsResponse(BaseModel):
+    budget: float
+    recommended_items: List[RestockingRecommendationItem]
+    total_cost: float
+    remaining_budget: float
+    skipped_item_skus: List[str]
+
+class RestockingOrderLineItem(BaseModel):
+    sku: str
+    name: str
+    quantity: int
+    unit_cost: float
+    line_total: float
+
+class RestockingOrder(BaseModel):
+    id: str
+    order_number: str
+    items: List[RestockingOrderLineItem]
+    budget: float
+    total_cost: float
+    status: str
+    created_date: str
+    lead_time_days: int
+    expected_delivery_date: str
+
+class SubmitRestockingOrderRequest(BaseModel):
+    budget: float
+    items: List[RestockingOrderLineItem]
 
 # API endpoints
 @app.get("/")
@@ -178,6 +276,42 @@ def get_backlog():
         item_dict["has_purchase_order"] = has_po
         result.append(item_dict)
     return result
+
+@app.get("/api/restocking/recommendations", response_model=RestockingRecommendationsResponse)
+def get_restocking_recommendations(budget: float = 0.0):
+    """Get greedy-by-urgency restocking recommendations within a budget"""
+    if budget < 0:
+        raise HTTPException(status_code=400, detail="budget must be non-negative")
+    return compute_restocking_recommendations(budget)
+
+@app.post("/api/restocking/orders", response_model=RestockingOrder, status_code=201)
+def create_restocking_order(request: SubmitRestockingOrderRequest):
+    """Submit the currently recommended items as a single restocking order"""
+    if not request.items:
+        raise HTTPException(status_code=400, detail="Cannot submit an order with no items")
+
+    created_date = datetime.now()
+    expected_delivery_date = created_date + timedelta(days=LEAD_TIME_DAYS)
+    total_cost = round(sum(item.line_total for item in request.items), 2)
+
+    order = {
+        "id": str(uuid4()),
+        "order_number": f"RESTOCK-{created_date.year}-{len(restocking_orders) + 1:04d}",
+        "items": [item.model_dump() for item in request.items],
+        "budget": request.budget,
+        "total_cost": total_cost,
+        "status": "Submitted",
+        "created_date": created_date.isoformat(),
+        "lead_time_days": LEAD_TIME_DAYS,
+        "expected_delivery_date": expected_delivery_date.isoformat()
+    }
+    restocking_orders.append(order)
+    return order
+
+@app.get("/api/restocking/orders", response_model=List[RestockingOrder])
+def get_restocking_orders():
+    """List all submitted restocking orders"""
+    return restocking_orders
 
 @app.get("/api/dashboard/summary")
 def get_dashboard_summary(

@@ -6,6 +6,7 @@ export default {
     orders: '注文',
     finance: '財務',
     demandForecast: '需要予測',
+    restocking: '再入荷',
     companyName: '触媒コンポーネンツ',
     subtitle: '在庫管理システム'
   },
@@ -125,8 +126,11 @@ export default {
       totalValue: '合計金額',
       status: 'ステータス',
       expectedDelivery: '予定配達日',
-      actualDelivery: '実際の配達日'
-    }
+      actualDelivery: '実際の配達日',
+      leadTime: 'リードタイム'
+    },
+    submittedOrders: '提出済み注文',
+    days: '日'
   },
 
   // Finance/Spending
@@ -185,6 +189,30 @@ export default {
       change: '変化',
       trend: 'トレンド',
       period: '期間'
+    }
+  },
+
+  // Restocking
+  restocking: {
+    title: '再入荷',
+    description: '予算を設定し、需要予測に基づいた再入荷アイテムの提案を確認する',
+    budgetLabel: '利用可能予算',
+    recommendedItems: '提案アイテム',
+    placeOrder: '注文する',
+    placingOrder: '注文中...',
+    orderSuccess: '注文{orderNumber}が送信されました — 注文タブでご確認ください。',
+    orderError: '注文の送信に失敗しました',
+    recommendationsError: '提案の読み込みに失敗しました',
+    noRecommendations: 'この予算内に収まるアイテムはありません',
+    totalCost: '合計コスト',
+    remainingBudget: '残り予算',
+    table: {
+      sku: 'SKU',
+      itemName: '品目名',
+      trend: 'トレンド',
+      suggestedQuantity: '提案数量',
+      unitCost: '単価',
+      lineTotal: '小計'
     }
   },
 
